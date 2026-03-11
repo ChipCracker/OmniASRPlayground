@@ -23,7 +23,14 @@ struct ContentView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     modelPicker
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        UIPasteboard.general.string = viewModel.transcription
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .disabled(viewModel.transcription.isEmpty)
+
                     Button("Clear") {
                         viewModel.clearTranscription()
                     }
