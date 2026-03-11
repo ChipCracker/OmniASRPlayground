@@ -40,17 +40,27 @@ final class CoreMLASRService: Sendable {
     ///
     /// - Parameter audio: Raw audio samples (will be normalized internally).
     /// - Returns: Transcribed text.
+    private static let sampleRate = 16000
+    /// The wav2vec2 feature extractor reduces T by a factor of ~320.
+    private static let featureStride = 320
+
     func transcribe(audio: [Float]) throws -> String {
         // 1. Normalize audio
         let normalized = AudioNormalizer.normalize(audio)
 
-        // 2. Create MLMultiArray input
+        // 2. Pad to the next full-second boundary (model uses EnumeratedShapes: 16000, 32000, ...)
+        let paddedLength = max(
+            Self.sampleRate,
+            ((normalized.count + Self.sampleRate - 1) / Self.sampleRate) * Self.sampleRate
+        )
+
+        // 3. Create MLMultiArray input (model expects Float16)
         let input = try MLMultiArray(
-            shape: [1, NSNumber(value: normalized.count)],
+            shape: [1, NSNumber(value: paddedLength)],
             dataType: .float16
         )
 
-        // Copy data efficiently
+        // Copy data efficiently, remaining elements stay zero-initialized
         let ptr = input.dataPointer.assumingMemoryBound(to: Float16.self)
         for (i, sample) in normalized.enumerated() {
             ptr[i] = Float16(sample)
@@ -62,16 +72,18 @@ final class CoreMLASRService: Sendable {
         )
         let prediction = try model.prediction(from: inputFeatures)
 
-        // 4. CTC decode
+        // 4. CTC decode — only process frames for actual audio, not zero-padded tail
         guard let logits = prediction.featureValue(for: "logits")?.multiArrayValue else {
             throw ASRError.missingOutput
         }
 
+        let actualFrames = normalized.count / Self.featureStride
+
         let text: String
         if logits.dataType == .float16 {
-            text = CTCDecoder.decode(logits: logits, vocabulary: vocabulary)
+            text = CTCDecoder.decode(logits: logits, vocabulary: vocabulary, maxTimeSteps: actualFrames)
         } else {
-            text = CTCDecoder.decodeFloat32(logits: logits, vocabulary: vocabulary)
+            text = CTCDecoder.decodeFloat32(logits: logits, vocabulary: vocabulary, maxTimeSteps: actualFrames)
         }
 
         // 5. Post-process

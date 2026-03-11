@@ -4,8 +4,10 @@ import Foundation
 /// Greedy CTC decoder: argmax → consecutive dedup → blank removal.
 /// Matches the Python CTC decoding logic from pipeline.py:318-330.
 struct CTCDecoder {
-    /// The blank token index (CTC blank = index 0, matching unk_id=0 in train_tokenizer.py).
-    static let blankIndex = 0
+    /// Special token indices to skip during decoding.
+    /// Matches Python's `skip_special_tokens=True` (pipeline.py:249).
+    /// 0=<s> (CTC blank), 1=<pad>, 2=</s>, 3=<unk>
+    static let specialTokenIndices: Set<Int> = [0, 1, 2, 3]
 
     /// SentencePiece word boundary marker.
     static let wordBoundary = "\u{2581}"
@@ -16,8 +18,9 @@ struct CTCDecoder {
     ///   - logits: MLMultiArray with shape [1, T, vocab_size]
     ///   - vocabulary: Array mapping token index to string
     /// - Returns: Decoded text string
-    static func decode(logits: MLMultiArray, vocabulary: [String]) -> String {
-        let timeSteps = logits.shape[1].intValue
+    static func decode(logits: MLMultiArray, vocabulary: [String], maxTimeSteps: Int? = nil) -> String {
+        let totalSteps = logits.shape[1].intValue
+        let timeSteps = min(maxTimeSteps ?? totalSteps, totalSteps)
         let vocabSize = logits.shape[2].intValue
 
         // Argmax per timestep
@@ -42,12 +45,12 @@ struct CTCDecoder {
             tokenIds.append(maxIdx)
         }
 
-        // Consecutive dedup + blank removal
+        // Consecutive dedup + special token removal
         var decoded = [Int]()
         var prev = -1
         for id in tokenIds {
             if id != prev {
-                if id != blankIndex {
+                if !specialTokenIndices.contains(id) {
                     decoded.append(id)
                 }
                 prev = id
@@ -65,8 +68,9 @@ struct CTCDecoder {
     }
 
     /// Decode CTC logits with Float32 data type.
-    static func decodeFloat32(logits: MLMultiArray, vocabulary: [String]) -> String {
-        let timeSteps = logits.shape[1].intValue
+    static func decodeFloat32(logits: MLMultiArray, vocabulary: [String], maxTimeSteps: Int? = nil) -> String {
+        let totalSteps = logits.shape[1].intValue
+        let timeSteps = min(maxTimeSteps ?? totalSteps, totalSteps)
         let vocabSize = logits.shape[2].intValue
 
         var tokenIds = [Int]()
@@ -94,7 +98,7 @@ struct CTCDecoder {
         var prev = -1
         for id in tokenIds {
             if id != prev {
-                if id != blankIndex {
+                if !specialTokenIndices.contains(id) {
                     decoded.append(id)
                 }
                 prev = id

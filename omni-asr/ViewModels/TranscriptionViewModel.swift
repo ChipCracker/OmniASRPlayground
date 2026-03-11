@@ -64,8 +64,9 @@ final class TranscriptionViewModel {
             }
         }
 
-        // Also look for .mlpackage directories alongside vocabulary.json
-        for item in contents where item.pathExtension == "mlpackage" {
+        // Also look for .mlmodelc / .mlpackage directories alongside vocabulary.json
+        let modelExtensions: Set<String> = ["mlmodelc", "mlpackage"]
+        for item in contents where modelExtensions.contains(item.pathExtension) {
             let baseName = item.deletingPathExtension().lastPathComponent
             let vocabURL = directory.appendingPathComponent("vocabulary.json")
             if fm.fileExists(atPath: vocabURL.path) {
