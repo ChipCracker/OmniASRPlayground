@@ -1,0 +1,14 @@
+[
+  {
+    "id": "OmniASR_CTC_300M",
+    "name": "Omni ASR 300M",
+    "vocabFile": "vocabulary.json",
+    "postProcessorType": "identity"
+  },
+  {
+    "id": "OmniASR_CTC_1B",
+    "name": "Omni ASR 1B",
+    "vocabFile": "vocabulary.json",
+    "postProcessorType": "identity"
+  }
+]
