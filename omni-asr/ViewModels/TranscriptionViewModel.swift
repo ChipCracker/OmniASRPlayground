@@ -20,6 +20,7 @@ final class TranscriptionViewModel {
     var availableModels: [CoreMLASRService.ModelInfo] = []
     var selectedModelId: String?
     var isFileImporterPresented: Bool = false
+    var transcriptionProgress: Double = 0
 
     private var asrService: CoreMLASRService?
     private let audioCaptureService = AudioCaptureService()
@@ -97,11 +98,13 @@ final class TranscriptionViewModel {
             let postProcessorType = modelInfo.postProcessorType
             let service = try await Task.detached(priority: .userInitiated) {
                 let (modelURL, vocabURL) = try Self.resolveModelPaths(for: modelInfo)
-                return try await CoreMLASRService.load(
+                let svc = try await CoreMLASRService.load(
                     modelURL: modelURL,
                     vocabularyURL: vocabURL,
                     postProcessorType: postProcessorType
                 )
+                try svc.warmUp()
+                return svc
             }.value
             asrService = service
             state = .ready
@@ -121,13 +124,15 @@ final class TranscriptionViewModel {
             if FileManager.default.fileExists(atPath: modelURL.path) {
                 return (modelURL, vocabURL)
             }
-            // Also try .mlpackage
+            // .mlpackage: compile once, cache the .mlmodelc for faster subsequent loads
             let packageURL = modelsDir.appendingPathComponent("\(info.id).mlpackage")
             if FileManager.default.fileExists(atPath: packageURL.path) {
-                return (
-                    try MLModel.compileModel(at: packageURL),
-                    vocabURL
-                )
+                let compiledURL = modelsDir.appendingPathComponent("\(info.id).mlmodelc")
+                if !FileManager.default.fileExists(atPath: compiledURL.path) {
+                    let tempCompiled = try MLModel.compileModel(at: packageURL)
+                    try FileManager.default.moveItem(at: tempCompiled, to: compiledURL)
+                }
+                return (compiledURL, vocabURL)
             }
         }
 
@@ -178,6 +183,7 @@ final class TranscriptionViewModel {
         }
 
         state = .transcribing
+        transcriptionProgress = 0
 
         guard let service = asrService else {
             state = .error("Model not loaded")
@@ -185,8 +191,10 @@ final class TranscriptionViewModel {
         }
 
         do {
-            let text = try await Task.detached(priority: .userInitiated) {
-                try service.transcribe(audio: samples)
+            let text = try await Task.detached(priority: .userInitiated) { [weak self] in
+                try service.transcribe(audio: samples) { progress in
+                    Task { @MainActor in self?.transcriptionProgress = progress }
+                }
             }.value
             appendTranscription(text)
             state = .ready
@@ -197,6 +205,7 @@ final class TranscriptionViewModel {
 
     func importAndTranscribe(url: URL) async {
         state = .transcribing
+        transcriptionProgress = 0
 
         guard let service = asrService else {
             state = .error("Kein Modell geladen")
@@ -204,9 +213,11 @@ final class TranscriptionViewModel {
         }
 
         do {
-            let text = try await Task.detached(priority: .userInitiated) {
+            let text = try await Task.detached(priority: .userInitiated) { [weak self] in
                 let samples = try AudioFileService.loadAudioFile(url: url)
-                return try service.transcribe(audio: samples)
+                return try service.transcribe(audio: samples) { progress in
+                    Task { @MainActor in self?.transcriptionProgress = progress }
+                }
             }.value
             appendTranscription(text)
             state = .ready

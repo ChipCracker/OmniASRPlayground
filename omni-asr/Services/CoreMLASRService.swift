@@ -75,16 +75,23 @@ final class CoreMLASRService: Sendable {
     /// The wav2vec2 feature extractor reduces T by a factor of ~320.
     private static let featureStride = 320
 
-    func transcribe(audio: [Float]) throws -> String {
+    func transcribe(
+        audio: [Float],
+        onProgress: (@Sendable (Double) -> Void)? = nil
+    ) throws -> String {
         let normalized = AudioNormalizer.normalize(audio)
         guard !normalized.isEmpty else { return "" }
 
         if normalized.count <= maxInputLength {
-            return try transcribeChunk(normalized)
+            let result = try transcribeChunk(normalized)
+            onProgress?(1.0)
+            return result
         }
 
         // Split long audio into chunks
+        let totalChunks = (normalized.count + maxInputLength - 1) / maxInputLength
         var results = [String]()
+        var chunkIndex = 0
         var offset = 0
         while offset < normalized.count {
             let end = min(offset + maxInputLength, normalized.count)
@@ -93,6 +100,8 @@ final class CoreMLASRService: Sendable {
             if !text.isEmpty {
                 results.append(text)
             }
+            chunkIndex += 1
+            onProgress?(Double(chunkIndex) / Double(totalChunks))
             offset = end
         }
         return results.joined(separator: " ")
@@ -137,6 +146,17 @@ final class CoreMLASRService: Sendable {
         }
 
         return postProcessor.process(text)
+    }
+
+    /// Run a minimal dummy prediction to warm up Metal shaders and Neural Engine.
+    /// Call once after loading to avoid slow first real prediction.
+    func warmUp() throws {
+        let minLength = allowedLengths.first ?? 16_000
+        let input = try MLMultiArray(shape: [1, NSNumber(value: minLength)], dataType: .float16)
+        let features = try MLDictionaryFeatureProvider(
+            dictionary: ["audio": MLFeatureValue(multiArray: input)]
+        )
+        _ = try model.prediction(from: features)
     }
 
     enum ASRError: Error, LocalizedError {
