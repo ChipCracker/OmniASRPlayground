@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var viewModel = TranscriptionViewModel()
@@ -35,6 +36,19 @@ struct ContentView: View {
                         viewModel.clearTranscription()
                     }
                     .disabled(viewModel.transcription.isEmpty)
+                }
+            }
+            .fileImporter(
+                isPresented: $viewModel.isFileImporterPresented,
+                allowedContentTypes: [.audio],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    Task { await viewModel.importAndTranscribe(url: url) }
+                case .failure(let error):
+                    viewModel.state = .error(error.localizedDescription)
                 }
             }
             .task {
@@ -90,7 +104,7 @@ struct ContentView: View {
     private var transcriptionArea: some View {
         ScrollView {
             if viewModel.transcription.isEmpty {
-                Text("Tippe auf das Mikrofon, um die Aufnahme zu starten.")
+                Text("Tippe auf das Mikrofon oder importiere eine Audiodatei.")
                     .foregroundStyle(.tertiary)
                     .padding(.top, 100)
             } else {
@@ -113,20 +127,35 @@ struct ContentView: View {
                 audioLevelView
             }
 
-            // Record button
-            Button {
-                Task {
-                    await viewModel.toggleRecording()
+            HStack(spacing: 24) {
+                // File import button
+                Button {
+                    viewModel.isFileImporterPresented = true
+                } label: {
+                    Image(systemName: "doc.badge.plus")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white)
+                        .frame(width: 48, height: 48)
+                        .background(Color.accentColor.opacity(0.8))
+                        .clipShape(Circle())
                 }
-            } label: {
-                Image(systemName: viewModel.state == .recording ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.white)
-                    .frame(width: 64, height: 64)
-                    .background(viewModel.state == .recording ? Color.red : Color.accentColor)
-                    .clipShape(Circle())
+                .disabled(viewModel.state != .ready)
+
+                // Record button
+                Button {
+                    Task {
+                        await viewModel.toggleRecording()
+                    }
+                } label: {
+                    Image(systemName: viewModel.state == .recording ? "stop.fill" : "mic.fill")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.white)
+                        .frame(width: 64, height: 64)
+                        .background(viewModel.state == .recording ? Color.red : Color.accentColor)
+                        .clipShape(Circle())
+                }
+                .disabled(!canToggleRecording)
             }
-            .disabled(!canToggleRecording)
             .padding(.bottom, 8)
         }
         .padding(.top, 12)
