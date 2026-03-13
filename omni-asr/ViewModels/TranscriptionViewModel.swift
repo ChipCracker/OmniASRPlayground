@@ -19,6 +19,7 @@ final class TranscriptionViewModel {
     var audioLevel: Float = 0
     var availableModels: [CoreMLASRService.ModelInfo] = []
     var selectedModelId: String?
+    var isFileImporterPresented: Bool = false
 
     private var asrService: CoreMLASRService?
     private let audioCaptureService = AudioCaptureService()
@@ -93,12 +94,15 @@ final class TranscriptionViewModel {
         state = .loadingModel
 
         do {
-            let (modelURL, vocabURL) = try resolveModelPaths(for: modelInfo)
-            let service = try CoreMLASRService(
-                modelURL: modelURL,
-                vocabularyURL: vocabURL,
-                postProcessorType: modelInfo.postProcessorType
-            )
+            let postProcessorType = modelInfo.postProcessorType
+            let service = try await Task.detached(priority: .userInitiated) {
+                let (modelURL, vocabURL) = try Self.resolveModelPaths(for: modelInfo)
+                return try await CoreMLASRService.load(
+                    modelURL: modelURL,
+                    vocabularyURL: vocabURL,
+                    postProcessorType: postProcessorType
+                )
+            }.value
             asrService = service
             state = .ready
         } catch {
@@ -106,7 +110,7 @@ final class TranscriptionViewModel {
         }
     }
 
-    private func resolveModelPaths(for info: CoreMLASRService.ModelInfo) throws -> (URL, URL) {
+    nonisolated private static func resolveModelPaths(for info: CoreMLASRService.ModelInfo) throws -> (URL, URL) {
         // Check Application Support first
         if let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
@@ -181,20 +185,46 @@ final class TranscriptionViewModel {
         }
 
         do {
-            let text = try service.transcribe(audio: samples)
-            if transcription.isEmpty {
-                transcription = text
-            } else {
-                transcription += "\n" + text
-            }
+            let text = try await Task.detached(priority: .userInitiated) {
+                try service.transcribe(audio: samples)
+            }.value
+            appendTranscription(text)
             state = .ready
         } catch {
             state = .error("Transcription failed: \(error.localizedDescription)")
         }
     }
 
+    func importAndTranscribe(url: URL) async {
+        state = .transcribing
+
+        guard let service = asrService else {
+            state = .error("Kein Modell geladen")
+            return
+        }
+
+        do {
+            let text = try await Task.detached(priority: .userInitiated) {
+                let samples = try AudioFileService.loadAudioFile(url: url)
+                return try service.transcribe(audio: samples)
+            }.value
+            appendTranscription(text)
+            state = .ready
+        } catch {
+            state = .error("Import fehlgeschlagen: \(error.localizedDescription)")
+        }
+    }
+
     func clearTranscription() {
         transcription = ""
+    }
+
+    private func appendTranscription(_ text: String) {
+        if transcription.isEmpty {
+            transcription = text
+        } else {
+            transcription += "\n" + text
+        }
     }
 
     enum ModelError: Error, LocalizedError {

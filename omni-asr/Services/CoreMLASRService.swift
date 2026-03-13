@@ -18,15 +18,12 @@ final class CoreMLASRService: Sendable {
     private let model: MLModel
     private let vocabulary: [String]
     private let postProcessor: any TokenizerPostProcessor
+    private let allowedLengths: [Int]
+    private let maxInputLength: Int
 
-    init(modelURL: URL, vocabularyURL: URL, postProcessorType: ModelInfo.PostProcessorType = .identity) throws {
-        let config = MLModelConfiguration()
-        config.computeUnits = .all  // CPU + GPU + Neural Engine
-
-        self.model = try MLModel(contentsOf: modelURL, configuration: config)
-
-        let data = try Data(contentsOf: vocabularyURL)
-        self.vocabulary = try JSONDecoder().decode([String].self, from: data)
+    private init(model: MLModel, vocabulary: [String], postProcessorType: ModelInfo.PostProcessorType) {
+        self.model = model
+        self.vocabulary = vocabulary
 
         switch postProcessorType {
         case .identity:
@@ -34,9 +31,43 @@ final class CoreMLASRService: Sendable {
         case .syllable:
             self.postProcessor = SyllablePostProcessor()
         }
+
+        // Read allowed input shapes from the model's enumerated shapes constraint
+        if let constraint = model.modelDescription
+               .inputDescriptionsByName["audio"]?
+               .multiArrayConstraint,
+           constraint.shapeConstraint.type == .enumerated {
+            let shapes = constraint.shapeConstraint.enumeratedShapes
+            let lengths = shapes.compactMap { shape -> Int? in
+                shape.count == 2 ? shape[1].intValue : nil
+            }.sorted()
+            self.allowedLengths = lengths
+            self.maxInputLength = lengths.last ?? 640_000
+        } else {
+            self.allowedLengths = stride(from: 16_000, through: 640_000, by: 16_000).map { $0 }
+            self.maxInputLength = 640_000
+        }
     }
 
-    /// Transcribe normalized audio samples.
+    /// Asynchronously load a CoreML model without blocking the main thread.
+    static func load(
+        modelURL: URL,
+        vocabularyURL: URL,
+        postProcessorType: ModelInfo.PostProcessorType = .identity
+    ) async throws -> CoreMLASRService {
+        let config = MLModelConfiguration()
+        config.computeUnits = .all
+
+        let model = try await MLModel.load(contentsOf: modelURL, configuration: config)
+
+        let data = try Data(contentsOf: vocabularyURL)
+        let vocabulary = try JSONDecoder().decode([String].self, from: data)
+
+        return CoreMLASRService(model: model, vocabulary: vocabulary, postProcessorType: postProcessorType)
+    }
+
+    /// Transcribe audio samples. Automatically chunks long audio that exceeds the model's
+    /// maximum input length.
     ///
     /// - Parameter audio: Raw audio samples (will be normalized internally).
     /// - Returns: Transcribed text.
@@ -45,16 +76,37 @@ final class CoreMLASRService: Sendable {
     private static let featureStride = 320
 
     func transcribe(audio: [Float]) throws -> String {
-        // 1. Normalize audio
         let normalized = AudioNormalizer.normalize(audio)
+        guard !normalized.isEmpty else { return "" }
 
-        // 2. Pad to the next full-second boundary (model uses EnumeratedShapes: 16000, 32000, ...)
-        let paddedLength = max(
-            Self.sampleRate,
-            ((normalized.count + Self.sampleRate - 1) / Self.sampleRate) * Self.sampleRate
-        )
+        if normalized.count <= maxInputLength {
+            return try transcribeChunk(normalized)
+        }
 
-        // 3. Create MLMultiArray input (model expects Float16)
+        // Split long audio into chunks
+        var results = [String]()
+        var offset = 0
+        while offset < normalized.count {
+            let end = min(offset + maxInputLength, normalized.count)
+            let chunk = Array(normalized[offset..<end])
+            let text = try transcribeChunk(chunk)
+            if !text.isEmpty {
+                results.append(text)
+            }
+            offset = end
+        }
+        return results.joined(separator: " ")
+    }
+
+    /// Find the smallest allowed input length that fits the given sample count.
+    private func bestAllowedLength(for count: Int) -> Int {
+        allowedLengths.first(where: { $0 >= count }) ?? maxInputLength
+    }
+
+    /// Transcribe a single chunk of normalized audio (must fit within maxInputLength).
+    private func transcribeChunk(_ samples: [Float]) throws -> String {
+        let paddedLength = bestAllowedLength(for: max(samples.count, Self.sampleRate))
+
         let input = try MLMultiArray(
             shape: [1, NSNumber(value: paddedLength)],
             dataType: .float16
@@ -62,22 +114,20 @@ final class CoreMLASRService: Sendable {
 
         // Copy data efficiently, remaining elements stay zero-initialized
         let ptr = input.dataPointer.assumingMemoryBound(to: Float16.self)
-        for (i, sample) in normalized.enumerated() {
+        for (i, sample) in samples.enumerated() {
             ptr[i] = Float16(sample)
         }
 
-        // 3. CoreML inference
         let inputFeatures = try MLDictionaryFeatureProvider(
             dictionary: ["audio": MLFeatureValue(multiArray: input)]
         )
         let prediction = try model.prediction(from: inputFeatures)
 
-        // 4. CTC decode — only process frames for actual audio, not zero-padded tail
         guard let logits = prediction.featureValue(for: "logits")?.multiArrayValue else {
             throw ASRError.missingOutput
         }
 
-        let actualFrames = normalized.count / Self.featureStride
+        let actualFrames = samples.count / Self.featureStride
 
         let text: String
         if logits.dataType == .float16 {
@@ -86,7 +136,6 @@ final class CoreMLASRService: Sendable {
             text = CTCDecoder.decodeFloat32(logits: logits, vocabulary: vocabulary, maxTimeSteps: actualFrames)
         }
 
-        // 5. Post-process
         return postProcessor.process(text)
     }
 
