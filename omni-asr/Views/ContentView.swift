@@ -75,6 +75,12 @@ struct ContentView: View {
         .padding(.horizontal)
         .padding(.vertical, 6)
         .background(.bar)
+        .overlay(alignment: .bottom) {
+            if viewModel.state == .transcribing {
+                ProgressView(value: viewModel.transcriptionProgress)
+                    .tint(.orange)
+            }
+        }
     }
 
     private var statusText: String {
