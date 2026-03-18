@@ -18,20 +18,29 @@ struct CTCDecoder {
     ///   - logits: MLMultiArray with shape [1, T, vocab_size]
     ///   - vocabulary: Array mapping token index to string
     /// - Returns: Decoded text string
-    static func decode(logits: MLMultiArray, vocabulary: [String], maxTimeSteps: Int? = nil) -> String {
+    static func decode(
+        logits: MLMultiArray,
+        vocabulary: [String],
+        maxTimeSteps: Int? = nil,
+        trimLeft: Int = 0,
+        trimRight: Int = 0
+    ) -> String {
         let totalSteps = logits.shape[1].intValue
         let timeSteps = min(maxTimeSteps ?? totalSteps, totalSteps)
         let vocabSize = logits.shape[2].intValue
 
-        // Argmax per timestep
+        let effectiveStart = trimLeft
+        let effectiveEnd = max(timeSteps - trimRight, effectiveStart)
+
+        // Argmax per timestep (only over the effective range)
         var tokenIds = [Int]()
-        tokenIds.reserveCapacity(timeSteps)
+        tokenIds.reserveCapacity(effectiveEnd - effectiveStart)
 
         let ptr = logits.dataPointer.assumingMemoryBound(to: Float16.self)
         let stride0 = logits.strides[1].intValue
         let stride1 = logits.strides[2].intValue
 
-        for t in 0..<timeSteps {
+        for t in effectiveStart..<effectiveEnd {
             var maxIdx = 0
             var maxVal: Float = -.infinity
             let baseOffset = t * stride0
@@ -68,19 +77,28 @@ struct CTCDecoder {
     }
 
     /// Decode CTC logits with Float32 data type.
-    static func decodeFloat32(logits: MLMultiArray, vocabulary: [String], maxTimeSteps: Int? = nil) -> String {
+    static func decodeFloat32(
+        logits: MLMultiArray,
+        vocabulary: [String],
+        maxTimeSteps: Int? = nil,
+        trimLeft: Int = 0,
+        trimRight: Int = 0
+    ) -> String {
         let totalSteps = logits.shape[1].intValue
         let timeSteps = min(maxTimeSteps ?? totalSteps, totalSteps)
         let vocabSize = logits.shape[2].intValue
 
+        let effectiveStart = trimLeft
+        let effectiveEnd = max(timeSteps - trimRight, effectiveStart)
+
         var tokenIds = [Int]()
-        tokenIds.reserveCapacity(timeSteps)
+        tokenIds.reserveCapacity(effectiveEnd - effectiveStart)
 
         let ptr = logits.dataPointer.assumingMemoryBound(to: Float.self)
         let stride0 = logits.strides[1].intValue
         let stride1 = logits.strides[2].intValue
 
-        for t in 0..<timeSteps {
+        for t in effectiveStart..<effectiveEnd {
             var maxIdx = 0
             var maxVal: Float = -.infinity
             let baseOffset = t * stride0
