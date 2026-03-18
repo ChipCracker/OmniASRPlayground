@@ -22,6 +22,8 @@ final class TranscriptionViewModel {
     private var pendingChunks: [String] = []
     var audioLevel: Float = 0
     var availableModels: [CoreMLASRService.ModelInfo] = []
+    /// Tracked set of locally downloaded model IDs (drives reactive UI updates).
+    var downloadedModelIds: Set<String> = []
     var selectedModelId: String?
     var selectedComputeUnits: CoreMLASRService.ComputeUnitOption = .cpuAndNeuralEngine
     var isFileImporterPresented: Bool = false
@@ -30,6 +32,7 @@ final class TranscriptionViewModel {
 
     private var asrService: CoreMLASRService?
     private let audioCaptureService = AudioCaptureService()
+    let downloadService = ModelDownloadService()
     private var liveTranscriptionTask: Task<Void, Never>?
     private var audioLevelTask: Task<Void, Never>?
     /// Frozen text for audio before the live window (recordings >40s)
@@ -48,26 +51,49 @@ final class TranscriptionViewModel {
     /// Minimum new audio samples before triggering a live transcription pass (~2s at 16kHz).
     private static let liveMinNewSamples = 32_000
 
-    /// Discover models in the app's Application Support directory and bundle.
-    func discoverModels() {
+    /// Discover models from local storage, bundle, and HuggingFace.
+    func discoverModels() async {
         var models = [CoreMLASRService.ModelInfo]()
 
-        // Check Application Support for downloaded models
-        if let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first {
-            let modelsDir = appSupport.appendingPathComponent("Models")
-            discoverModelsIn(directory: modelsDir, into: &models)
-        }
+        // Local: Application Support (downloaded models)
+        discoverModelsIn(directory: downloadService.modelsDirectory, into: &models)
 
-        // Check app bundle for bundled models
+        // Local: App bundle (bundled models, if any)
         if let bundlePath = Bundle.main.resourceURL {
             discoverModelsIn(directory: bundlePath, into: &models)
         }
 
+        // Remote: Fetch from HuggingFace, merge with local
+        do {
+            let remoteModels = try await downloadService.fetchRemoteModelInfo()
+            for remote in remoteModels where !models.contains(where: { $0.id == remote.id }) {
+                models.append(remote)
+            }
+            // Update existing entries with download metadata from remote
+            for (i, local) in models.enumerated() {
+                if let remote = remoteModels.first(where: { $0.id == local.id }) {
+                    models[i].downloadSize = remote.downloadSize
+                    models[i].files = remote.files
+                }
+            }
+        } catch {
+            Self.log.warning("Could not fetch remote models: \(error)")
+            // Fallback: use bundled model_info.json for entries not yet discovered
+            if let bundleInfo = Bundle.main.url(forResource: "model_info", withExtension: "json"),
+               let data = try? Data(contentsOf: bundleInfo),
+               let bundleModels = try? JSONDecoder().decode([CoreMLASRService.ModelInfo].self, from: data) {
+                for bundled in bundleModels where !models.contains(where: { $0.id == bundled.id }) {
+                    models.append(bundled)
+                }
+            }
+        }
+
         availableModels = models
+        downloadedModelIds = Set(models.map(\.id).filter { downloadService.isModelDownloaded($0) })
         if selectedModelId == nil {
-            selectedModelId = models.first(where: { $0.id == "OmniASR_CTC_300M_int8" })?.id
+            let firstDownloaded = models.first(where: { downloadedModelIds.contains($0.id) })
+            selectedModelId = firstDownloaded?.id
+                ?? models.first(where: { $0.id == "OmniASR_CTC_300M_int8" })?.id
                 ?? models.first?.id
         }
     }
@@ -86,7 +112,9 @@ final class TranscriptionViewModel {
         for item in contents where item.lastPathComponent == "model_info.json" {
             if let data = try? Data(contentsOf: item),
                let infos = try? JSONDecoder().decode([CoreMLASRService.ModelInfo].self, from: data) {
-                models.append(contentsOf: infos)
+                for info in infos where !models.contains(where: { $0.id == info.id }) {
+                    models.append(info)
+                }
             }
         }
 
@@ -100,7 +128,9 @@ final class TranscriptionViewModel {
                     id: baseName,
                     name: baseName,
                     vocabFile: "vocabulary.json",
-                    postProcessorType: baseName.lowercased().contains("syllable") ? .syllable : .identity
+                    postProcessorType: baseName.lowercased().contains("syllable") ? .syllable : .identity,
+                    downloadSize: nil,
+                    files: nil
                 )
                 if !models.contains(where: { $0.id == info.id }) {
                     models.append(info)
@@ -109,10 +139,40 @@ final class TranscriptionViewModel {
         }
     }
 
+    /// Check if a model is available locally (downloaded or bundled).
+    func isModelAvailableLocally(_ model: CoreMLASRService.ModelInfo) -> Bool {
+        downloadedModelIds.contains(model.id)
+            || Bundle.main.url(forResource: model.id, withExtension: "mlmodelc") != nil
+    }
+
+    func downloadModel(_ model: CoreMLASRService.ModelInfo) async {
+        do {
+            try await downloadService.downloadModel(model)
+            downloadedModelIds.insert(model.id)
+        } catch {
+            state = .error("Download fehlgeschlagen: \(error.localizedDescription)")
+        }
+    }
+
+    func deleteModel(_ modelId: String) {
+        if selectedModelId == modelId {
+            asrService = nil
+            state = .idle
+        }
+        try? downloadService.deleteModel(modelId)
+        downloadedModelIds.remove(modelId)
+    }
+
     func loadModel() async {
         guard let modelId = selectedModelId,
               let modelInfo = availableModels.first(where: { $0.id == modelId }) else {
             state = .error("No model selected")
+            return
+        }
+
+        // Check if model is available locally
+        guard isModelAvailableLocally(modelInfo) else {
+            state = .error("Modell nicht heruntergeladen")
             return
         }
 
