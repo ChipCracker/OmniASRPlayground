@@ -1,26 +1,58 @@
 [
   {
-    "id": "OmniASR_CTC_300M_fp16",
-    "name": "Omni ASR 300M (FP16)",
-    "vocabFile": "vocabulary.json",
-    "postProcessorType": "identity"
-  },
-  {
     "id": "OmniASR_CTC_300M_int8",
     "name": "Omni ASR 300M (INT8)",
     "vocabFile": "vocabulary.json",
-    "postProcessorType": "identity"
+    "postProcessorType": "identity",
+    "downloadSize": 326365992,
+    "files": [
+      "OmniASR_CTC_300M_int8.mlmodelc/coremldata.bin",
+      "OmniASR_CTC_300M_int8.mlmodelc/metadata.json",
+      "OmniASR_CTC_300M_int8.mlmodelc/model.mil",
+      "OmniASR_CTC_300M_int8.mlmodelc/analytics/coremldata.bin",
+      "OmniASR_CTC_300M_int8.mlmodelc/weights/weight.bin"
+    ]
   },
   {
-    "id": "OmniASR_CTC_1B_fp16",
-    "name": "Omni ASR 1B (FP16)",
+    "id": "OmniASR_CTC_300M_fp16",
+    "name": "Omni ASR 300M (FP16)",
     "vocabFile": "vocabulary.json",
-    "postProcessorType": "identity"
+    "postProcessorType": "identity",
+    "downloadSize": 651016808,
+    "files": [
+      "OmniASR_CTC_300M_fp16.mlmodelc/coremldata.bin",
+      "OmniASR_CTC_300M_fp16.mlmodelc/metadata.json",
+      "OmniASR_CTC_300M_fp16.mlmodelc/model.mil",
+      "OmniASR_CTC_300M_fp16.mlmodelc/analytics/coremldata.bin",
+      "OmniASR_CTC_300M_fp16.mlmodelc/weights/weight.bin"
+    ]
   },
   {
     "id": "OmniASR_CTC_1B_int8",
     "name": "Omni ASR 1B (INT8)",
     "vocabFile": "vocabulary.json",
-    "postProcessorType": "identity"
+    "postProcessorType": "identity",
+    "downloadSize": 977116200,
+    "files": [
+      "OmniASR_CTC_1B_int8.mlmodelc/coremldata.bin",
+      "OmniASR_CTC_1B_int8.mlmodelc/metadata.json",
+      "OmniASR_CTC_1B_int8.mlmodelc/model.mil",
+      "OmniASR_CTC_1B_int8.mlmodelc/analytics/coremldata.bin",
+      "OmniASR_CTC_1B_int8.mlmodelc/weights/weight.bin"
+    ]
+  },
+  {
+    "id": "OmniASR_CTC_1B_fp16",
+    "name": "Omni ASR 1B (FP16)",
+    "vocabFile": "vocabulary.json",
+    "postProcessorType": "identity",
+    "downloadSize": 1950181992,
+    "files": [
+      "OmniASR_CTC_1B_fp16.mlmodelc/coremldata.bin",
+      "OmniASR_CTC_1B_fp16.mlmodelc/metadata.json",
+      "OmniASR_CTC_1B_fp16.mlmodelc/model.mil",
+      "OmniASR_CTC_1B_fp16.mlmodelc/analytics/coremldata.bin",
+      "OmniASR_CTC_1B_fp16.mlmodelc/weights/weight.bin"
+    ]
   }
 ]

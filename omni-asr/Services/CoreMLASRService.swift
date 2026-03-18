@@ -28,6 +28,8 @@ final class CoreMLASRService: Sendable {
         let name: String
         let vocabFile: String
         let postProcessorType: PostProcessorType
+        var downloadSize: Int64?
+        var files: [String]?
 
         enum PostProcessorType: String, Codable, Sendable {
             case identity

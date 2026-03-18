@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var showCopiedFeedback = false
     @State private var previousState: TranscriptionViewModel.AppState = .idle
     @State private var driftPhase: CGFloat = 0
+    @State private var isModelManagerPresented = false
 
     var body: some View {
         ZStack {
@@ -102,6 +103,9 @@ struct ContentView: View {
                 viewModel.clearTranscription()
             }
         }
+        .sheet(isPresented: $isModelManagerPresented) {
+            ModelManagerSheet(viewModel: viewModel)
+        }
         .fileImporter(
             isPresented: $viewModel.isFileImporterPresented,
             allowedContentTypes: [.audio],
@@ -125,8 +129,10 @@ struct ContentView: View {
             }
         }
         .task {
-            viewModel.discoverModels()
-            if viewModel.selectedModelId != nil {
+            await viewModel.discoverModels()
+            if let selectedId = viewModel.selectedModelId,
+               let model = viewModel.availableModels.first(where: { $0.id == selectedId }),
+               viewModel.isModelAvailableLocally(model) {
                 await viewModel.loadModel()
             }
         }
@@ -263,23 +269,8 @@ struct ContentView: View {
     // MARK: - Model Picker
 
     private var modelPicker: some View {
-        Menu {
-            ForEach(viewModel.availableModels) { model in
-                Button {
-                    viewModel.selectedModelId = model.id
-                    Task { await viewModel.loadModel() }
-                } label: {
-                    HStack {
-                        Text(model.name)
-                        if model.id == viewModel.selectedModelId {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-            }
-            if viewModel.availableModels.isEmpty {
-                Text("Keine Modelle gefunden")
-            }
+        Button {
+            isModelManagerPresented = true
         } label: {
             HStack(spacing: 6) {
                 // Status dot
