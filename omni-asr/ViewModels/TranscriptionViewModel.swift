@@ -1,29 +1,52 @@
 import CoreML
 import Foundation
+import os
 import SwiftUI
 
 @Observable
 @MainActor
 final class TranscriptionViewModel {
+    private static let log = Logger(subsystem: "omni-asr", category: "TranscriptionViewModel")
     enum AppState: Equatable {
         case idle
         case loadingModel
         case ready
-        case recording
+        case recording          // Record only, transcribe after stop
+        case liveRecording      // Record + live transcription
         case transcribing
         case error(String)
     }
 
     var state: AppState = .idle
     var transcription: String = ""
+    private var pendingChunks: [String] = []
     var audioLevel: Float = 0
     var availableModels: [CoreMLASRService.ModelInfo] = []
     var selectedModelId: String?
+    var selectedComputeUnits: CoreMLASRService.ComputeUnitOption = .cpuAndNeuralEngine
     var isFileImporterPresented: Bool = false
     var transcriptionProgress: Double = 0
+    var modelLoadProgress: Double = 0
 
     private var asrService: CoreMLASRService?
     private let audioCaptureService = AudioCaptureService()
+    private var liveTranscriptionTask: Task<Void, Never>?
+    private var audioLevelTask: Task<Void, Never>?
+    /// Frozen text for audio before the live window (recordings >40s)
+    private(set) var frozenTranscription: String = ""
+    /// Sample offset where the frozen transcription ends
+    private var frozenSampleCount: Int = 0
+    /// Buffer size at last inference (gate for new inference)
+    private var lastTranscribedSampleCount: Int = 0
+    /// The unconfirmed (live) portion of the transcription, derived from the full transcription minus the frozen prefix.
+    var liveTranscription: String {
+        guard state == .liveRecording, !frozenTranscription.isEmpty else { return transcription }
+        let prefix = frozenTranscription + " "
+        return transcription.hasPrefix(prefix) ? String(transcription.dropFirst(prefix.count)) : transcription
+    }
+
+    /// Minimum new audio samples before triggering a live transcription pass (~2s at 16kHz).
+    private static let liveMinNewSamples = 32_000
 
     /// Discover models in the app's Application Support directory and bundle.
     func discoverModels() {
@@ -44,7 +67,8 @@ final class TranscriptionViewModel {
 
         availableModels = models
         if selectedModelId == nil {
-            selectedModelId = models.first?.id
+            selectedModelId = models.first(where: { $0.id == "OmniASR_CTC_300M_int8" })?.id
+                ?? models.first?.id
         }
     }
 
@@ -93,17 +117,22 @@ final class TranscriptionViewModel {
         }
 
         state = .loadingModel
+        modelLoadProgress = 0
 
         do {
             let postProcessorType = modelInfo.postProcessorType
-            let service = try await Task.detached(priority: .userInitiated) {
+            let computeUnits = selectedComputeUnits.mlComputeUnits
+            let service = try await Task.detached(priority: .userInitiated) { [weak self] in
                 let (modelURL, vocabURL) = try Self.resolveModelPaths(for: modelInfo)
                 let svc = try await CoreMLASRService.load(
                     modelURL: modelURL,
                     vocabularyURL: vocabURL,
-                    postProcessorType: postProcessorType
+                    postProcessorType: postProcessorType,
+                    computeUnits: computeUnits
                 )
-                try svc.warmUp()
+                try svc.warmUp { progress in
+                    Task { @MainActor in self?.modelLoadProgress = progress }
+                }
                 return svc
             }.value
             asrService = service
@@ -156,14 +185,91 @@ final class TranscriptionViewModel {
         }
     }
 
+    func toggleLiveRecording() async {
+        switch state {
+        case .liveRecording:
+            await stopLiveRecording()
+        case .ready:
+            await startLiveRecording()
+        default:
+            break
+        }
+    }
+
+    private func startLiveRecording() async {
+        do {
+            try audioCaptureService.startRecording()
+            state = .liveRecording
+            transcription = ""
+            frozenTranscription = ""
+            frozenSampleCount = 0
+            lastTranscribedSampleCount = 0
+
+            // Poll audio level
+            audioLevelTask = Task {
+                while state == .liveRecording, !Task.isCancelled {
+                    audioLevel = audioCaptureService.audioLevel
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+            }
+
+            startLiveTranscription()
+        } catch {
+            state = .error("Failed to start recording: \(error.localizedDescription)")
+        }
+    }
+
+    private func stopLiveRecording() async {
+        state = .transcribing
+        transcriptionProgress = 0
+
+        // Cancel and wait for in-flight tasks to complete
+        audioLevelTask?.cancel()
+        liveTranscriptionTask?.cancel()
+        if let task = liveTranscriptionTask {
+            await task.value
+            liveTranscriptionTask = nil
+        }
+
+        let samples = audioCaptureService.stopRecording()
+        audioLevel = 0
+
+        // Final pass: transcribe everything after frozen prefix
+        let remainingCount = samples.count - frozenSampleCount
+        if remainingCount >= 16_000 {
+            guard let service = asrService else {
+                state = .error("Kein Modell geladen")
+                return
+            }
+
+            let segment = Array(samples[frozenSampleCount...])
+            do {
+                let finalText = try await Task.detached(priority: .userInitiated) {
+                    try await service.transcribe(audio: segment)
+                }.value
+
+                if frozenTranscription.isEmpty {
+                    transcription = finalText
+                } else {
+                    transcription = frozenTranscription + " " + finalText
+                }
+            } catch {
+                state = .error("Transkription fehlgeschlagen: \(error.localizedDescription)")
+                return
+            }
+        }
+
+        state = .ready
+    }
+
     private func startRecording() async {
         do {
             try audioCaptureService.startRecording()
             state = .recording
 
             // Poll audio level
-            Task {
-                while state == .recording {
+            audioLevelTask = Task {
+                while state == .recording, !Task.isCancelled {
                     audioLevel = audioCaptureService.audioLevel
                     try? await Task.sleep(for: .milliseconds(50))
                 }
@@ -173,39 +279,107 @@ final class TranscriptionViewModel {
         }
     }
 
+    private struct BufferSnapshot: Sendable {
+        let liveSegment: [Float]
+        let freezeSegment: [Float]?
+        let newFrozenEnd: Int
+        let bufferCount: Int
+    }
+
+    /// Snapshot buffer state on @MainActor — called from detached live-transcription loop.
+    private func takeBufferSnapshot(maxInput: Int) -> BufferSnapshot? {
+        guard state == .liveRecording else { return nil }
+
+        let bufferCount = audioCaptureService.buffer.count
+        guard bufferCount - lastTranscribedSampleCount >= Self.liveMinNewSamples else { return nil }
+
+        var freezeSegment: [Float]?
+        var newFrozenEnd = frozenSampleCount
+
+        // Freeze check: if live window would exceed maxInputLength, freeze older audio
+        if bufferCount - frozenSampleCount > maxInput {
+            newFrozenEnd = bufferCount - maxInput
+            freezeSegment = Array(audioCaptureService.buffer[frozenSampleCount..<newFrozenEnd])
+        }
+
+        let liveSegment = Array(audioCaptureService.buffer[newFrozenEnd..<bufferCount])
+        return BufferSnapshot(
+            liveSegment: liveSegment,
+            freezeSegment: freezeSegment,
+            newFrozenEnd: newFrozenEnd,
+            bufferCount: bufferCount
+        )
+    }
+
+    /// Apply freeze transcription result on @MainActor.
+    private func applyFreezeResult(_ text: String, newFrozenEnd: Int) {
+        if !text.isEmpty {
+            frozenTranscription += (frozenTranscription.isEmpty ? "" : " ") + text
+        }
+        frozenSampleCount = newFrozenEnd
+    }
+
+    /// Apply live transcription result on @MainActor.
+    private func applyLiveResult(_ text: String, processedCount: Int) {
+        if frozenTranscription.isEmpty {
+            transcription = text
+        } else {
+            transcription = frozenTranscription + " " + text
+        }
+        lastTranscribedSampleCount = processedCount
+    }
+
+    private func startLiveTranscription() {
+        guard let service = asrService else { return }
+        let maxInput = service.maxInputLength
+
+        liveTranscriptionTask = Task.detached(priority: .userInitiated) { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled else { break }
+
+                // Brief main-actor hop: state check + buffer snapshot
+                guard let snapshot = await self?.takeBufferSnapshot(maxInput: maxInput) else {
+                    // nil means either self is gone or state/gate check failed
+                    let stillRecording = await self?.state == .liveRecording
+                    if !stillRecording { break }
+                    continue
+                }
+
+                do {
+                    // Freeze inference (if needed) — runs entirely off main actor
+                    if let freezeSegment = snapshot.freezeSegment {
+                        let freezeText = try await service.transcribe(audio: freezeSegment)
+                        guard !Task.isCancelled else { break }
+                        await self?.applyFreezeResult(freezeText, newFrozenEnd: snapshot.newFrozenEnd)
+                    }
+
+                    // Live inference — runs entirely off main actor
+                    let liveText = try await service.transcribe(audio: snapshot.liveSegment)
+                    guard !Task.isCancelled else { break }
+                    await self?.applyLiveResult(liveText, processedCount: snapshot.bufferCount)
+                } catch {
+                    Self.log.error("Live transcription error: \(error)")
+                }
+            }
+        }
+    }
+
     private func stopRecordingAndTranscribe() async {
+        state = .transcribing
+        transcriptionProgress = 0
+        audioLevelTask?.cancel()
+        pendingChunks = []
+        transcription = ""
+
         let samples = audioCaptureService.stopRecording()
         audioLevel = 0
+        Self.log.debug("stopRecordingAndTranscribe: samples.count=\(samples.count)")
 
         guard !samples.isEmpty else {
             state = .ready
             return
         }
-
-        state = .transcribing
-        transcriptionProgress = 0
-
-        guard let service = asrService else {
-            state = .error("Model not loaded")
-            return
-        }
-
-        do {
-            let text = try await Task.detached(priority: .userInitiated) { [weak self] in
-                try service.transcribe(audio: samples) { progress in
-                    Task { @MainActor in self?.transcriptionProgress = progress }
-                }
-            }.value
-            appendTranscription(text)
-            state = .ready
-        } catch {
-            state = .error("Transcription failed: \(error.localizedDescription)")
-        }
-    }
-
-    func importAndTranscribe(url: URL) async {
-        state = .transcribing
-        transcriptionProgress = 0
 
         guard let service = asrService else {
             state = .error("Kein Modell geladen")
@@ -213,13 +387,64 @@ final class TranscriptionViewModel {
         }
 
         do {
-            let text = try await Task.detached(priority: .userInitiated) { [weak self] in
-                let samples = try AudioFileService.loadAudioFile(url: url)
-                return try service.transcribe(audio: samples) { progress in
-                    Task { @MainActor in self?.transcriptionProgress = progress }
-                }
+            _ = try await Task.detached(priority: .userInitiated) { [weak self] in
+                return try await service.transcribe(audio: samples,
+                    onProgress: { progress in
+                        await MainActor.run { self?.transcriptionProgress = progress }
+                    },
+                    onChunkResult: { text in
+                        await MainActor.run {
+                            guard let self else { return }
+                            self.pendingChunks.append(text)
+                            self.transcription = self.pendingChunks.joined(separator: " ")
+                        }
+                    }
+                )
             }.value
-            appendTranscription(text)
+            state = .ready
+        } catch {
+            state = .error("Transkription fehlgeschlagen: \(error.localizedDescription)")
+        }
+    }
+
+    func importAndTranscribe(url: URL) async {
+        state = .transcribing
+        transcriptionProgress = 0
+        Self.log.debug("importAndTranscribe: url=\(url.lastPathComponent)")
+
+        guard let service = asrService else {
+            state = .error("Kein Modell geladen")
+            return
+        }
+
+        pendingChunks = []
+        Self.log.debug("importAndTranscribe: pendingChunks reset, starting transcription")
+        do {
+            _ = try await Task.detached(priority: .userInitiated) { [weak self] in
+                let samples = try AudioFileService.loadAudioFile(url: url)
+                Self.log.debug("importAndTranscribe: loaded \(samples.count) samples")
+                return try await service.transcribe(audio: samples,
+                    onProgress: { progress in
+                        await MainActor.run {
+                            Self.log.debug("onProgress: \(progress)")
+                            self?.transcriptionProgress = progress
+                        }
+                    },
+                    onChunkResult: { text in
+                        await MainActor.run {
+                            guard let self else {
+                                Self.log.error("onChunkResult: self is nil!")
+                                return
+                            }
+                            self.pendingChunks.append(text)
+                            let joined = self.pendingChunks.joined(separator: " ")
+                            Self.log.debug("onChunkResult: pendingChunks.count=\(self.pendingChunks.count), newChunk=\"\(text.prefix(80))\", transcription=\"\(joined.prefix(120))\"")
+                            self.transcription = joined
+                        }
+                    }
+                )
+            }.value
+            Self.log.debug("importAndTranscribe: .value returned, transcription=\"\(self.transcription.prefix(120))\"")
             state = .ready
         } catch {
             state = .error("Import fehlgeschlagen: \(error.localizedDescription)")
@@ -228,13 +453,11 @@ final class TranscriptionViewModel {
 
     func clearTranscription() {
         transcription = ""
-    }
-
-    private func appendTranscription(_ text: String) {
-        if transcription.isEmpty {
-            transcription = text
-        } else {
-            transcription += "\n" + text
+        frozenTranscription = ""
+        frozenSampleCount = 0
+        lastTranscribedSampleCount = 0
+        if case .error = state, asrService != nil {
+            state = .ready
         }
     }
 

@@ -1,13 +1,25 @@
 [
   {
-    "id": "OmniASR_CTC_300M",
-    "name": "Omni ASR 300M",
+    "id": "OmniASR_CTC_300M_fp16",
+    "name": "Omni ASR 300M (FP16)",
     "vocabFile": "vocabulary.json",
     "postProcessorType": "identity"
   },
   {
-    "id": "OmniASR_CTC_1B",
-    "name": "Omni ASR 1B",
+    "id": "OmniASR_CTC_300M_int8",
+    "name": "Omni ASR 300M (INT8)",
+    "vocabFile": "vocabulary.json",
+    "postProcessorType": "identity"
+  },
+  {
+    "id": "OmniASR_CTC_1B_fp16",
+    "name": "Omni ASR 1B (FP16)",
+    "vocabFile": "vocabulary.json",
+    "postProcessorType": "identity"
+  },
+  {
+    "id": "OmniASR_CTC_1B_int8",
+    "name": "Omni ASR 1B (INT8)",
     "vocabFile": "vocabulary.json",
     "postProcessorType": "identity"
   }

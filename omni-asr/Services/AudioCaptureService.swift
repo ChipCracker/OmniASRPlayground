@@ -47,8 +47,8 @@ final class AudioCaptureService: ObservableObject {
                 samples = Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))
             }
 
-            // Compute RMS for level meter
-            let rms = Self.computeRMS(samples)
+            // Compute normalized audio level for meters/waveform
+            let rms = Self.computeNormalizedLevel(samples)
 
             Task { @MainActor in
                 self.buffer.append(contentsOf: samples)
@@ -118,9 +118,16 @@ final class AudioCaptureService: ObservableObject {
         return Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))
     }
 
-    private static func computeRMS(_ samples: [Float]) -> Float {
+    /// Compute audio level from samples, normalized to 0…1 using dB scale.
+    /// -50 dB floor (silence) → 0, 0 dB (full scale) → 1.
+    private static func computeNormalizedLevel(_ samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
         let sumOfSquares = samples.reduce(Float(0)) { $0 + $1 * $1 }
-        return sqrt(sumOfSquares / Float(samples.count))
+        let rms = sqrt(sumOfSquares / Float(samples.count))
+        guard rms > 0 else { return 0 }
+        let db = 20 * log10(rms)
+        let floor: Float = -50
+        let clamped = max(floor, min(0, db))
+        return (clamped - floor) / -floor
     }
 }

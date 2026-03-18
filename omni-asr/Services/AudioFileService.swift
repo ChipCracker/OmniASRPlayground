@@ -81,38 +81,53 @@ enum AudioFileService {
 
         let ratio = targetSampleRate / sourceFormat.sampleRate
         let outputFrameCount = AVAudioFrameCount(Double(sourceFrameCount) * ratio)
-        guard let outputBuffer = AVAudioPCMBuffer(
-            pcmFormat: targetFormat,
-            frameCapacity: outputFrameCount
-        ) else {
-            throw AudioFileError.conversionFailed
-        }
 
+        // Convert in a loop — AVAudioConverter may need multiple passes for large files
         var error: NSError?
         var hasData = true
-        converter.convert(to: outputBuffer, error: &error) { _, outStatus in
-            if hasData {
-                outStatus.pointee = .haveData
-                hasData = false
-                return sourceBuffer
+        var allSamples = [Float]()
+        allSamples.reserveCapacity(Int(outputFrameCount))
+
+        let batchSize: AVAudioFrameCount = 65536
+        var isDone = false
+
+        while !isDone {
+            guard let iterBuffer = AVAudioPCMBuffer(
+                pcmFormat: targetFormat,
+                frameCapacity: batchSize
+            ) else {
+                throw AudioFileError.conversionFailed
             }
-            outStatus.pointee = .endOfStream
-            return nil
+
+            let status = converter.convert(to: iterBuffer, error: &error) { _, outStatus in
+                if hasData {
+                    outStatus.pointee = .haveData
+                    hasData = false
+                    return sourceBuffer
+                }
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+
+            if let error { throw error }
+
+            if let channelData = iterBuffer.floatChannelData, iterBuffer.frameLength > 0 {
+                let ptr = UnsafeBufferPointer(start: channelData[0], count: Int(iterBuffer.frameLength))
+                allSamples.append(contentsOf: ptr)
+            }
+
+            switch status {
+            case .haveData: continue
+            case .endOfStream: isDone = true
+            case .error: throw error ?? AudioFileError.conversionFailed
+            @unknown default: isDone = true
+            }
         }
 
-        if let error {
-            throw error
-        }
-
-        guard let channelData = outputBuffer.floatChannelData else {
-            throw AudioFileError.conversionFailed
-        }
-
-        let count = Int(outputBuffer.frameLength)
-        guard count > 0 else {
+        guard !allSamples.isEmpty else {
             throw AudioFileError.emptyFile
         }
 
-        return Array(UnsafeBufferPointer(start: channelData[0], count: count))
+        return allSamples
     }
 }
