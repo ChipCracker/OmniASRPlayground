@@ -1,5 +1,6 @@
 import CoreML
 import Foundation
+import OmniASRKit
 import os
 import SwiftUI
 
@@ -29,6 +30,7 @@ final class TranscriptionViewModel {
     var isFileImporterPresented: Bool = false
     var transcriptionProgress: Double = 0
     var modelLoadProgress: Double = 0
+    var modelLoadPhase: String = ""
 
     private var asrService: CoreMLASRService?
     private let audioCaptureService = AudioCaptureService()
@@ -178,6 +180,7 @@ final class TranscriptionViewModel {
 
         state = .loadingModel
         modelLoadProgress = 0
+        modelLoadPhase = "Kompiliere für Neural Engine…"
 
         do {
             let postProcessorType = modelInfo.postProcessorType
@@ -190,12 +193,14 @@ final class TranscriptionViewModel {
                     postProcessorType: postProcessorType,
                     computeUnits: computeUnits
                 )
+                Task { @MainActor in self?.modelLoadPhase = "Aufwärmen…" }
                 try svc.warmUp { progress in
                     Task { @MainActor in self?.modelLoadProgress = progress }
                 }
                 return svc
             }.value
             asrService = service
+            modelLoadPhase = ""
             state = .ready
         } catch {
             state = .error("Failed to load model: \(error.localizedDescription)")
