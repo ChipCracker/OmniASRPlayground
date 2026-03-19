@@ -1,4 +1,5 @@
 import Foundation
+import OmniASRKit
 import os
 
 /// Downloads CoreML models from HuggingFace and manages local storage.

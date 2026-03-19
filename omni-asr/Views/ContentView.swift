@@ -1,3 +1,4 @@
+import OmniASRKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -238,9 +239,6 @@ struct ContentView: View {
                 StatusRingView(progress: progress, color: .orange)
             } else if viewModel.state == .liveRecording {
                 StatusRingView(progress: nil, color: .teal)
-            } else if viewModel.state == .loadingModel {
-                let progress = viewModel.modelLoadProgress > 0 ? viewModel.modelLoadProgress : nil
-                StatusRingView(progress: progress, color: .indigo)
             }
 
             Text(statusText)
@@ -257,7 +255,7 @@ struct ContentView: View {
     private var statusText: String {
         switch viewModel.state {
         case .idle: "Kein Modell geladen"
-        case .loadingModel: "Modell wird geladen…"
+        case .loadingModel: ""
         case .ready: "Bereit"
         case .recording: "Aufnahme…"
         case .liveRecording: "Live-Transkription…"
@@ -382,31 +380,113 @@ struct ContentView: View {
     // MARK: - Model Loading View
 
     private var modelLoadingView: some View {
-        VStack(spacing: AppTheme.Spacing.md) {
-            Image(systemName: "cpu")
-                .font(.system(size: 48, weight: .thin))
-                .foregroundStyle(.secondary)
-                .symbolEffect(.pulse.byLayer)
+        let isCompiling = viewModel.modelLoadProgress == 0
+        let progress = viewModel.modelLoadProgress
 
-            VStack(spacing: AppTheme.Spacing.xs) {
+        return VStack(spacing: AppTheme.Spacing.lg) {
+            // Ring + Icon
+            ZStack {
+                // Ring background track
+                Circle()
+                    .stroke(Color.indigo.opacity(0.1), lineWidth: 4)
+                    .frame(width: 100, height: 100)
+
+                if isCompiling {
+                    // Indeterminate comet-tail ring
+                    CometRing(color: .indigo)
+                        .frame(width: 100, height: 100)
+
+                    // Orbiting dots
+                    OrbitingDots(color: .indigo)
+                        .frame(width: 120, height: 120)
+                        .transition(.opacity)
+                } else {
+                    // Determinate progress ring
+                    Circle()
+                        .trim(from: 0, to: progress)
+                        .stroke(
+                            Color.indigo,
+                            style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                        )
+                        .frame(width: 100, height: 100)
+                        .rotationEffect(.degrees(-90))
+                        .animation(.easeInOut(duration: 0.3), value: progress)
+                }
+
+                // Center: CPU icon + optional percent
+                VStack(spacing: 2) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 32, weight: .thin))
+                        .foregroundStyle(.indigo)
+                        .symbolEffect(.pulse.byLayer, isActive: isCompiling)
+
+                    if !isCompiling {
+                        Text("\(Int(progress * 100))%")
+                            .font(.caption2.monospacedDigit())
+                            .fontWeight(.medium)
+                            .foregroundStyle(.indigo)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+            }
+            .shadow(color: .indigo.opacity(0.25), radius: 16)
+            .animation(.spring(response: 0.5), value: isCompiling)
+
+            // Model name + step list
+            VStack(spacing: AppTheme.Spacing.sm) {
                 if let model = viewModel.availableModels.first(where: { $0.id == viewModel.selectedModelId }) {
                     Text(model.name)
                         .font(.headline)
                         .foregroundStyle(.primary)
                 }
-                Text("Modell wird geladen…")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
 
-                if viewModel.modelLoadProgress > 0 {
-                    ProgressView(value: viewModel.modelLoadProgress)
-                        .tint(.indigo)
-                        .frame(width: 120)
+                VStack(alignment: .leading, spacing: 8) {
+                    loadingStep(
+                        "Modell laden",
+                        isActive: false,
+                        isCompleted: true
+                    )
+                    loadingStep(
+                        "Neural Engine kompilieren",
+                        isActive: isCompiling,
+                        isCompleted: !isCompiling
+                    )
+                    loadingStep(
+                        "Aufwärmen",
+                        isActive: !isCompiling,
+                        isCompleted: false
+                    )
                 }
             }
         }
         .padding(AppTheme.Spacing.xxl)
         .glassCard()
+    }
+
+    @ViewBuilder
+    private func loadingStep(_ title: String, isActive: Bool, isCompleted: Bool) -> some View {
+        HStack(spacing: 8) {
+            if isCompleted {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else if isActive {
+                ProgressView()
+                    .scaleEffect(0.6)
+                    .frame(width: 14, height: 14)
+            } else {
+                Circle()
+                    .stroke(Color.secondary.opacity(0.3), lineWidth: 1.5)
+                    .frame(width: 14, height: 14)
+            }
+
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(isActive ? .primary : (isCompleted ? .secondary : .tertiary))
+                .fontWeight(isActive ? .medium : .regular)
+        }
+        .animation(.easeInOut(duration: 0.3), value: isActive)
+        .animation(.easeInOut(duration: 0.3), value: isCompleted)
     }
 
     // MARK: - Control Bar
@@ -519,6 +599,69 @@ struct ContentView: View {
                 .frame(width: 48, height: 48)
                 .background(.ultraThinMaterial, in: Circle())
         }
+    }
+}
+
+// MARK: - Comet Ring (indeterminate spinning arc)
+
+private struct CometRing: View {
+    let color: Color
+    @State private var rotation: Angle = .zero
+
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.3)
+            .stroke(
+                AngularGradient(
+                    colors: [color.opacity(0), color],
+                    center: .center
+                ),
+                style: StrokeStyle(lineWidth: 4, lineCap: .round)
+            )
+            .rotationEffect(rotation)
+            .onAppear {
+                withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+                    rotation = .degrees(360)
+                }
+            }
+    }
+}
+
+// MARK: - Orbiting Dots (compilation phase decoration)
+
+private struct OrbitingDots: View {
+    let color: Color
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            Canvas { context, size in
+                let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                let radius = min(size.width, size.height) / 2
+
+                for i in 0..<3 {
+                    let phase = Double(i) * (.pi * 2 / 3)
+                    let speed = 1.2 + Double(i) * 0.15
+                    let angle = t * speed + phase
+                    let x = center.x + cos(angle) * radius
+                    let y = center.y + sin(angle) * radius
+                    let opacity = 0.4 + 0.3 * sin(t * 2 + phase)
+
+                    let dotSize: CGFloat = 5 - CGFloat(i)
+                    let rect = CGRect(
+                        x: x - dotSize / 2,
+                        y: y - dotSize / 2,
+                        width: dotSize,
+                        height: dotSize
+                    )
+                    context.fill(
+                        Path(ellipseIn: rect),
+                        with: .color(color.opacity(opacity))
+                    )
+                }
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
